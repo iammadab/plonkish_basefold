@@ -14,7 +14,7 @@ use halo2_proofs::{
     },
     transcript::{Blake2bRead, Blake2bWrite, TranscriptReadBuffer, TranscriptWriterBuffer},
 };
-use itertools::Itertools;
+use itertools::{chain, Itertools};
 use plonkish_backend::{
     poly::multilinear::{MultilinearPolynomial},
     backend::{self, PlonkishBackend, PlonkishCircuit},
@@ -49,6 +49,7 @@ use std::{
 
 const OUTPUT_DIR: &str = "./bench_data/pcs";
 use std::env;
+use plonkish_backend::pcs::Evaluation;
 
 #[derive(Debug)]
 struct P {}
@@ -163,6 +164,105 @@ where
     assert_eq!(result,Ok(()));
 }
 
+fn bench_pcs_batch<F, Pcs, T>(k: usize, batch_size: usize, pcs : System )
+    where
+        F: PrimeField,
+        Pcs: PolynomialCommitmentScheme<F, Polynomial = MultilinearPolynomial<F>>,
+        T: TranscriptRead<Pcs::CommitmentChunk, F>
+        + TranscriptWrite<Pcs::CommitmentChunk, F>
+        + InMemoryTranscript<Param = ()>,
+
+{
+    let timer = start_timer(|| format!("PCS setup and trim -{k}"));
+    let mut rng = OsRng;
+    let poly_size = 1 << k;
+    let param = Pcs::setup(poly_size, batch_size, &mut rng).unwrap();
+    let trim_t = Instant::now();
+    let (pp,vp) = Pcs::trim(&param, poly_size, batch_size).unwrap();
+
+
+
+    let timer = start_timer(|| format!("commit -{k}"));
+    let mut transcript = T::new(());
+
+    let polys = (0..batch_size).map(|_| MultilinearPolynomial::rand(k, OsRng)).collect_vec();
+
+    let sample_size = sample_size(k);
+
+    let mut commit_times = Vec::new();
+    let mut times = Vec::new();
+    // for i in 0..sample_size{
+
+
+    let cstart = Instant::now();
+    let comms = Pcs::batch_commit_and_write(&pp, &polys, &mut transcript).unwrap();
+    // let comm = Pcs::commit_and_write(&pp, &poly, &mut transcript).unwrap();
+    commit_times.push(cstart.elapsed());
+
+    let points = vec![transcript.squeeze_challenges(k); batch_size];
+    let evals = (0..batch_size).zip(0..)
+        .map(|(idx, point)| Evaluation::new(idx, point, polys[idx].evaluate(&points[point])))
+        .collect_vec();
+    let start = Instant::now();
+    // let evals = polys.iter().map(|poly| Evaluation::new(poly.evaluate(point.as_slice())).collect_vec();
+    // transcript.write_field_elements(evals.iter().map(|e| e.value())).unwrap();
+    Pcs::batch_open(&pp, &polys, &comms, &points, &evals, &mut transcript).unwrap();
+    // Pcs::open(&pp, &poly, &comm, &point, &eval, &mut transcript).unwrap();
+    times.push(start.elapsed());
+
+    // }
+    let sum = times.iter().sum::<Duration>();
+    let csum = commit_times.iter().sum::<Duration>();
+
+    let avg = sum;
+    let cavg = csum;
+
+
+    writeln!(&mut pcs.batch_output(), "batch commit - {k}, {}", cavg.as_millis()).unwrap();
+    writeln!(&mut pcs.batch_output(), "batch open - {k}, {}", avg.as_millis()).unwrap();
+
+    let proof = transcript.into_proof();
+
+    let timer = start_timer(|| format!("verify-{k}"));
+    let result = {
+        let mut transcript = T::from_proof((),proof.as_slice());
+        let mut start_size = 0;
+        while(transcript.read_commitment().is_ok()){
+            start_size = start_size + 1;
+        }
+        println!("start size: {start_size}");
+
+        let mut transcript = T::from_proof((),proof.as_slice());
+        let now = Instant::now();
+        let points = vec![transcript.squeeze_challenges(k); batch_size];
+        let evals = (0..batch_size).map(|i| Evaluation::new(i, i, transcript.read_field_element().unwrap())).collect_vec();
+        let b = Pcs::batch_verify(
+            &vp,
+            &Pcs::read_commitments(&vp, batch_size, &mut transcript).unwrap(),
+            &points,
+            evals.as_slice(),
+            &mut transcript
+        );
+        // let b = Pcs::verify(
+        //     &vp,
+        //     &Pcs::read_commitment(&vp, &mut transcript).unwrap(),
+        //     &transcript.squeeze_challenges(k),
+        //     &transcript.read_field_element().unwrap(),
+        //     &mut transcript
+        // );
+        writeln!(&mut pcs.batch_output(), "batch verify {:?}: {:?}", k, now.elapsed().as_millis()).unwrap();
+        let mut end_size = 0;
+        while(transcript.read_commitment().is_ok()){
+            end_size = end_size + 1;
+        }
+        writeln!(&mut pcs.batch_output(), "batch size {:?} {:?} : {:?}", pcs, k, (start_size - end_size)*256);
+        b
+    };
+
+    end_timer(timer);
+    assert_eq!(result,Ok(()));
+}
+
 
 
 
@@ -213,7 +313,9 @@ impl System {
 
     fn verify_output_path(&self) -> String {
         format!("{OUTPUT_DIR}/verify_{self}")
-    }    
+    }
+
+    fn batch_output_path(&self) -> String { format!("{OUTPUT_DIR}/batch_{self}")}
 
     fn commit_output(&self) -> File {
 
@@ -236,7 +338,14 @@ impl System {
             .append(true)
             .open(self.verify_output_path())
             .unwrap()
-    }        
+    }
+
+    fn batch_output(&self) -> File {
+        OpenOptions::new()
+            .append(true)
+            .open(self.batch_output_path())
+            .unwrap()
+    }
 
 
     fn bench(&self, k: usize) {
@@ -276,6 +385,9 @@ impl System {
 	    System::ZeromorphFri => bench_pcs::<Fr, ZeromorphFri<Fri<Fr,Blake2s>>, Blake2sTranscript<_>>(k, System::ZeromorphFri)
             
 	}
+
+        // println!("benching batch pcs");
+        // bench_pcs_batch::<GoldilocksMont, Basefold<GoldilocksMont, Blake2s, Twenty>, Blake2sTranscript<_>>(20, 60, System::BasefoldBlake2s);
     }
 }
 
@@ -339,7 +451,8 @@ fn create_output(systems: &[System]) {
         File::create(system.output_path()).unwrap();
         File::create(system.commit_output_path()).unwrap();
         File::create(system.size_output_path()).unwrap();
-        File::create(system.verify_output_path()).unwrap();			
+        File::create(system.verify_output_path()).unwrap();
+        File::create(system.batch_output_path()).unwrap();
     }
 }
 
