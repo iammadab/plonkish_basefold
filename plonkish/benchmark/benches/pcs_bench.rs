@@ -298,7 +298,7 @@ impl Display for System {
 
 fn parse_args() -> (Vec<System>, Range<usize>) {
     let (systems, k_range) = args().chain(Some("".to_string())).tuple_windows().fold(
-        (Vec::new(),  10..24),
+        (Vec::new(),  17..23),
         |(mut systems,  mut k_range), (key, value)| {
             match key.as_str() {
                 "--system" => match value.as_str() {
@@ -319,7 +319,8 @@ fn parse_args() -> (Vec<System>, Range<usize>) {
                 }
                 _ => {}
             }
-            (vec![System::Basefold256], k_range)
+            // (vec![System::Basefold256], k_range)
+            (vec![System::BasefoldBlake2s], k_range)
         },
     );
 
